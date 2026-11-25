@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <title>น้องเสเต้นกับเนเน่</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background: #0d0d14;
+            color: white;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+        .top-bar {
+            height: 64px;
+            background: #181824;
+            border-bottom: 2px solid #ff007f;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            flex-shrink: 0;
+        }
+        .game-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #fff;
+            text-shadow: 0 0 10px #ff007f;
+        }
+        .stats-bar {
+            font-size: 22px;
+            font-weight: bold;
+            display: flex;
+            gap: 24px;
+            align-items: center;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 15px;
+            font-weight: bold;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        button:active { transform: scale(0.95); }
+        #start-btn { background: #ff007f; color: white; }
+        #start-btn:disabled { background: #555; cursor: not-allowed; }
+        .sec-btn { background: #2a2a3d; color: #00ffcc; border: 1px solid #00ffcc; }
+
+        #setup-drawer {
+            display: none;
+            background: #1e1e2e;
+            padding: 12px 24px;
+            border-bottom: 2px solid #00ffcc;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            font-size: 15px;
+        }
+        #setup-drawer select {
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .main-stage {
+            flex: 1;
+            display: flex;
+            width: 100%;
+            height: calc(100vh - 64px);
+            padding: 16px;
+            gap: 16px;
+            position: relative;
+        }
+        .panel {
+            flex: 1;
+            height: 100%;
+            background: #161622;
+            border-radius: 16px;
+            border: 3px solid #ff007f;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+        .panel.cam-panel {
+            border-color: #00ffcc;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        #live-pose-badge {
+            position: absolute;
+            top: 14px;
+            left: 14px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid #00ffcc;
+            color: #00ffcc;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 16px;
+            font-weight: bold;
+            z-index: 5;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="top-bar">
+        <div class="game-title">🎤 น้องเสเต้นกับเนเน่</div>
+        <div class="stats-bar">
+            <span>Score: <span id="score" style="color:#00ffcc;">0</span></span>
+            <span>Combo: <span id="combo" style="color:#00ffcc;">0</span></span>
+            <span id="feedback" style="color:#ffcc00;">กำลังเปิดกล้อง...</span>
+        </div>
+        <div class="controls">
+            <button id="start-btn" onclick="startGame()" disabled>⏳ รอสักครู่...</button>
+            <button class="sec-btn" onclick="toggleSetup()">⚙️ ท่าทาง</button>
+            <button class="sec-btn" onclick="toggleFullscreen()">⛶ เต็มจอ</button>
+        </div>
+    </div>
+
+    <div id="setup-drawer">
+        <div>⬅️ ซ้าย: <select id="map-left"></select></div>
+        <div>⬇️ ลง: <select id="map-down"></select></div>
+        <div>⬆️ ขึ้น: <select id="map-up"></select></div>
+        <div>➡️ ขวา: <select id="map-right"></select></div>
+    </div>
+
+    <div class="main-stage">
+        <div class="panel">
+            <canvas id="game-canvas" width="600" height="800"></canvas>
+        </div>
+        <div class="panel cam-panel">
+            <div id="live-pose-badge">ท่าปัจจุบัน: -</div>
+            <canvas id="canvas"></canvas>
+        </div>
+    </div>
+
+    <audio id="bgm-audio" src="./song.mp3" preload="auto" loop></audio>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+
+    <script>
+        // อัปเดตลิงก์โมเดลใหม่เรียบร้อยแล้ว
+        const URL = "https://teachablemachine.withgoogle.com/models/3-GCDDnyp/";
+        const CONFIDENCE_THRESHOLD = 0.65;
+
+        let model, webcam, ctx, maxPredictions;
+        let currentPose = "None";
+        let classLabels = [];
+
+        const gameCanvas = document.getElementById("game-canvas");
+        const gCtx = gameCanvas.getContext("2d");
+        const bgmAudio = document.getElementById("bgm-audio");
+        const livePoseBadge = document.getElementById("live-pose-badge");
+
+        let score = 0, combo = 0, gameStartTime = 0, isPlaying = false;
+        let audioCtx;
+        let LANES = [], beatmap = [];
+        const TARGET_Y = 110;
+        const NOTE_SPEED = 240;
+
+        function toggleSetup() {
+            const drawer = document.getElementById("setup-drawer");
+            drawer.style.display = (drawer.style.display === "flex") ? "none" : "flex";
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(() => {});
+            } else {
+                document.exitFullscreen().catch(() => {});
+            }
+        }
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === "suspended") audioCtx.resume();
+        }
+
+        function playHitTone(freq) {
+            initAudio();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.frequency.value = freq;
+            osc.type = "triangle";
+            gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.15);
+        }
+
+        function playOofSound() {
+            initAudio();
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const osc2 = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = "sawtooth";
+            osc2.type = "triangle";
+
+            osc.frequency.setValueAtTime(230, now);
+            osc.frequency.exponentialRampToValueAtTime(115, now + 0.22);
+
+            osc2.frequency.setValueAtTime(180, now);
+            osc2.frequency.exponentialRampToValueAtTime(85, now + 0.22);
+
+            gain.gain.setValueAtTime(0.5, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.24);
+
+            osc.connect(gain);
+            osc2.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start(now);
+            osc2.start(now);
+            osc.stop(now + 0.25);
+            osc2.stop(now + 0.25);
+        }
+
+        window.addEventListener("load", async () => {
+            try {
+                model = await tmPose.load(URL + "model.json", URL + "metadata.json");
+                maxPredictions = model.getTotalClasses();
+                classLabels = model.getClassLabels();
+
+                const defaultMapping = [
+                    { id: "map-left",  keywords: ["ซ้าย", "left"] },
+                    { id: "map-down",  keywords: ["อ้า", "ลง", "down"] },
+                    { id: "map-up",    keywords: ["ชู", "ขึ้น", "up"] },
+                    { id: "map-right", keywords: ["ขวา", "right"] }
+                ];
+
+                defaultMapping.forEach((item, idx) => {
+                    const sel = document.getElementById(item.id);
+                    let matchedIndex = -1;
+
+                    classLabels.forEach((label, labelIdx) => {
+                        const lowerLabel = label.toLowerCase();
+                        if (item.keywords.some(kw => lowerLabel.includes(kw))) {
+                            matchedIndex = labelIdx;
+                        }
+                    });
+
+                    classLabels.forEach((label, labelIdx) => {
+                        const opt = document.createElement("option");
+                        opt.value = label;
+                        opt.text = label;
+                        if (matchedIndex !== -1) {
+                            if (labelIdx === matchedIndex) opt.selected = true;
+                        } else if (labelIdx === idx) {
+                            opt.selected = true;
+                        }
+                        sel.appendChild(opt);
+                    });
+                });
+
+                const camSize = 260;
+                webcam = new tmPose.Webcam(camSize, camSize, true);
+                await webcam.setup();
+                await webcam.play();
+
+                const canvas = document.getElementById("canvas");
+                canvas.width = camSize;
+                canvas.height = camSize;
+                ctx = canvas.getContext("2d");
+
+                const startBtn = document.getElementById("start-btn");
+                startBtn.disabled = false;
+                startBtn.innerText = "▶️ เริ่มเล่นเกม!";
+                document.getElementById("feedback").innerText = "พร้อมแล้ว!";
+
+                window.requestAnimationFrame(loop);
+            } catch (err) {
+                document.getElementById("feedback").innerText = "กรุณากดอนุญาตใช้กล้อง";
+            }
+        });
+
+        function startGame() {
+            const leftDir  = document.getElementById("map-left").value;
+            const downDir  = document.getElementById("map-down").value;
+            const upDir    = document.getElementById("map-up").value;
+            const rightDir = document.getElementById("map-right").value;
+
+            LANES = [
+                { dir: leftDir,  x: 90,  symbol: "⬅️" },
+                { dir: downDir,  x: 230, symbol: "⬇️" },
+                { dir: upDir,    x: 370, symbol: "⬆️" },
+                { dir: rightDir, x: 510, symbol: "➡️" }
+            ];
+
+            const dirs = [leftDir, rightDir, upDir, downDir];
+            beatmap = [];
+            for (let i = 0; i < 20; i++) {
+                beatmap.push({
+                    time: 3.0 + (i * 2.2), 
+                    dir: dirs[Math.floor(Math.random() * dirs.length)],
+                    hit: false,
+                    missed: false
+                });
+            }
+
+            score = 0; combo = 0;
+            document.getElementById("score").innerText = score;
+            document.getElementById("combo").innerText = combo;
+            document.getElementById("feedback").innerText = "ลุยเลย!";
+            document.getElementById("start-btn").innerText = "🔄 เล่นใหม่";
+            
+            gameStartTime = performance.now();
+            isPlaying = true;
+
+            bgmAudio.currentTime = 0;
+            bgmAudio.volume = 0.6;
+            bgmAudio.play().catch(() => {});
+        }
+
+        async function loop() {
+            webcam.update();
+            await predict();
+            updateGame();
+            window.requestAnimationFrame(loop);
+        }
+
+        async function predict() {
+            const { pose, posenetOutput } = await model.estimatePose(webcam.canvas);
+            const prediction = await model.predict(posenetOutput);
+            let bestClass = "None", highestProb = 0;
+
+            for (let i = 0; i < maxPredictions; i++) {
+                if (prediction[i].probability > highestProb) {
+                    highestProb = prediction[i].probability;
+                    bestClass = prediction[i].className;
+                }
+            }
+
+            if (highestProb >= CONFIDENCE_THRESHOLD) {
+                currentPose = bestClass;
+                livePoseBadge.innerText = `ท่าปัจจุบัน: ${bestClass} (${(highestProb * 100).toFixed(0)}%)`;
+            } else {
+                currentPose = "None";
+                livePoseBadge.innerText = `ท่าปัจจุบัน: รอท่าทาง...`;
+            }
+
+            ctx.drawImage(webcam.canvas, 0, 0);
+            if (pose) {
+                tmPose.drawKeypoints(pose.keypoints, 0.5, ctx);
+                tmPose.drawSkeleton(pose.keypoints, 0.5, ctx);
+            }
+        }
+
+        function updateGame() {
+            if (!isPlaying) return;
+            const elapsedTime = (performance.now() - gameStartTime) / 1000;
+            gCtx.clearRect(0, 0, gameCanvas.width, gameCanvas.height);
+
+            gCtx.font = "72px Arial";
+            gCtx.textAlign = "center";
+            gCtx.textBaseline = "middle";
+
+            LANES.forEach(lane => {
+                gCtx.globalAlpha = (currentPose === lane.dir) ? 1.0 : 0.35;
+                gCtx.fillText(lane.symbol, lane.x, TARGET_Y);
+            });
+            gCtx.globalAlpha = 1.0;
+
+            let remainingNotes = 0;
+
+            beatmap.forEach(note => {
+                if (note.hit || note.missed) return;
+                remainingNotes++;
+
+                const timeDiff = note.time - elapsedTime;
+                const noteY = TARGET_Y + (timeDiff * NOTE_SPEED);
+
+                if (noteY > -80 && noteY < gameCanvas.height + 80) {
+                    const lane = LANES.find(l => l.dir === note.dir);
+                    if (lane) gCtx.fillText(lane.symbol, lane.x, noteY);
+                }
+
+                if (Math.abs(timeDiff) <= 0.60 && currentPose === note.dir) {
+                    note.hit = true;
+                    score += 100; combo += 1;
+                    document.getElementById("score").innerText = score;
+                    document.getElementById("combo").innerText = combo;
+                    document.getElementById("feedback").innerText = "SICK! 🔥";
+                    document.getElementById("feedback").style.color = "#00ffcc";
+                    playHitTone(440 + (combo * 20));
+                } else if (timeDiff < -0.60) {
+                    note.missed = true;
+                    combo = 0;
+                    document.getElementById("combo").innerText = combo;
+                    document.getElementById("feedback").innerText = "OOF! ❌";
+                    document.getElementById("feedback").style.color = "#ff4444";
+                    playOofSound();
+                }
+            });
+
+            if (remainingNotes === 0) {
+                isPlaying = false;
+                bgmAudio.pause();
+                document.getElementById("feedback").innerText = "จบเพลง! ได้คะแนน " + score + " 🎉";
+                document.getElementById("feedback").style.color = "#00ffcc";
+            }
+        }
+    </script>
+</body>
+</html>
